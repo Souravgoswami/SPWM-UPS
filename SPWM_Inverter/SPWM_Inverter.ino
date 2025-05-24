@@ -11,7 +11,7 @@
 // I'm using 13 SWG pure copper wire, having a skin depth of 1190um at 3kHz, which is on the edge.
 // Having more frequency or bunching up multiple wires together during transformer winding will increase the overall waveform and the efficiency
 // NOTE THAT HAVING LOWER SIN_DIVISIONS (e.g. 10) WILL OSCILLATE THE OUTPUT. PLEASE ADJUST PID CONTROL PARAMETERS TO AVOID THAT. 
-#define SIN_DIVISIONS 40
+#define SIN_DIVISIONS 50
 #define POWER_CONFIRMATION_DELAY 10
 // Sinusoidal frequency
 #define FREQUENCY 50
@@ -38,6 +38,7 @@
   Relay AC Side Switching Going to AC
 */
 #define DELAY_MS_BEFORE_RELAY_TOGGLES_FROM_DC_TO_DC 2000
+#define SHUTDOWN_COOLDOWN_PERIOD_AFTER_AC_RECOVERY 1000
 #define RELAY_PIN 3
 
 #define BUZZER_PIN 4
@@ -67,7 +68,7 @@
 // Lower resistor of voltage divider. Precision required
 #define V_SENSE_R2_VDIV 22000
 #define ADC_INPUT_DC_VOLTAGE ((1 << REFS0) | 1)
-#define BUZZER_ENABLED false
+#define BUZZER_ENABLED true
 
 /*
   LED Configuration
@@ -165,6 +166,7 @@ struct UPSData {
   uint64_t lastSwitchedToDCOffset = 0;
   uint64_t testDCOutputOffset = 0;
   uint64_t ocpTriggeredAt = false;
+  uint64_t acSwitchedLastAt = 0;
   bool powerOut = false;
   bool shutdown = false;
   bool ocpTriggered = false;
@@ -226,6 +228,7 @@ float readVcc() {
   // 1.1 * 1023 / result
   return 1125.3 / result;
 }
+
 void setup() {
   delay(100);
 
@@ -307,8 +310,6 @@ void setup() {
     delay(45);
   }
 
-  pinMode(13, OUTPUT); // TODO remove
-
   delay(200);
 }
 
@@ -321,10 +322,8 @@ void startInverter() {
   digitalWrite(3, LOW);
   uint64_t now = millis64();
 
-  if (dcVoltage.currentVoltage <= UV_SHUTDOWN_LEVEL) {
-    // upsData.shutdown = true;
-  } else {
-    upsData.shutdown = false; // TODO: REMOVE
+  if ((dcVoltage.currentVoltage <= UV_SHUTDOWN_LEVEL) && (now >= upsData.acSwitchedLastAt + SHUTDOWN_COOLDOWN_PERIOD_AFTER_AC_RECOVERY)) {
+    upsData.shutdown = true;
   }
 
   if (!upsData.shutdown && !upsData.ocpTriggered && outputCurrentSense.avgACCurrent >= OCP_CURRENT) {
@@ -347,22 +346,24 @@ void startInverter() {
 
   if (upsData.shutdown && !Buzzer::isShutdown()) {
     Buzzer::triggerShutdownAlarm(1000);
-  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_2) {
-    Buzzer::beep(5, 50, 33, 1000);
-  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_1) {
-    Buzzer::beep(3, 100, 66, 10000);
-  } else {
-    Buzzer::beep(2, 300, 200, 30000);
+  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_2 && dcVoltage.currentVoltage > UV_SHUTDOWN_LEVEL) {
+    Buzzer::beep(5, 40, 60, 2000);
+  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_1 && dcVoltage.currentVoltage > UV_WARN_LEVEL_2) {
+    Buzzer::beep(3, 40, 60, 9720);
+  } else if (dcVoltage.currentVoltage > UV_WARN_LEVEL_1) {
+    Buzzer::beep(2, 160, 240, 30000);
   }
 
   // LED alarm on drained battery
   if (FLASH_ON_UV_WARN) {
+    LED::resume();
+
     if (upsData.shutdown) {
       LED::flash(3, 100, 100, 300);
     }
   }
 
-  if (!(upsData.switchToAC || upsData.shutdown || upsData.ocpStart)) {
+  if (!(upsData.shutdown || upsData.ocpStart)) {
     // --- Compute error ---
     float error = TARGET_VOLTAGE - acVoltage.avgACVoltage;
 
@@ -513,8 +514,11 @@ void loop() {
   upsData.switchToAC = now > upsData.lastSwitchedToDCOffset;
 
   if (upsData.switchToAC) {
-    // Turn on the relay to turn on the AC output
     digitalWrite(3, HIGH);
+    Buzzer::shutdown(1);
+    LED::shutdown();
+    upsData.acSwitchedLastAt = now;
+    upsData.shutdown = false;
   } else {
     startInverter();
   }
@@ -578,7 +582,7 @@ ISR(TIMER1_OVF_vect) {
 }
 
 ISR(TIMER2_COMPA_vect) {
-  Buzzer::tick();
+  Buzzer::update();
   LED::update();
 }
 
