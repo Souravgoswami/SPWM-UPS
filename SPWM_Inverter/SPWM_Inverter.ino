@@ -3,6 +3,9 @@
   Modified By Sourav Goswami (https://github.com/Souravgoswami/)
 */
 #pragma GCC optimize "Os"
+#include <stdbool.h>
+
+#define DEBUG false
 
 /*
   Sine Wave tweaks
@@ -10,8 +13,8 @@
 // Sub divisions of sisusoidal wave, set it to 10 for 10 * 50 (freq) = 500Hz, and 40 for 2kHz switching speed
 // I'm using 13 SWG pure copper wire, having a skin depth of 1190um at 3kHz, which is on the edge.
 // Having more frequency or bunching up multiple wires together during transformer winding will increase the overall waveform and the efficiency
-// NOTE THAT HAVING LOWER SIN_DIVISIONS (e.g. 10) WILL OSCILLATE THE OUTPUT. PLEASE ADJUST PID CONTROL PARAMETERS TO AVOID THAT. 
-#define SIN_DIVISIONS 50
+// NOTE THAT HAVING LOWER SIN_DIVISIONS (e.g. 10) WILL OSCILLATE THE OUTPUT. PLEASE ADJUST PID CONTROL PARAMETERS TO AVOID THAT.
+#define SIN_DIVISIONS 40
 #define POWER_CONFIRMATION_DELAY 10
 // Sinusoidal frequency
 #define FREQUENCY 50
@@ -19,7 +22,7 @@
 // Adjust based on your transformer and output capacitor
 #define MAX_PWM_ADJ 1.25
 #define MIN_PWM_ADJ 0.01
-#define TARGET_VOLTAGE 208.0
+#define TARGET_VOLTAGE 210.0
 #define TEST_DC_OUTPUT_AFTER_STARTUP_DURATION 1000
 
 /*
@@ -30,7 +33,7 @@
 #define AC_VOLTAGE_MEASUREMENT_CORRECTION_FACTOR 1
 #define DC_VOLTAGE_MEASUREMENT_CORRECTION_FACTOR 1
 
-#define SAMPLING_WINDOW_MS 50
+#define SAMPLING_WINDOW_MS 60
 #define RESISTOR_DIVIDER_1 1000000
 #define RESISTOR_DIVIDER_2 10000
 
@@ -89,7 +92,7 @@
 */
 #define ADC_INPUT_I_SENSE ((1 << REFS0) | 2)
 #define ACS_712_ZERO_CURRENT_VOLTAGE 2.5
-#define ACS_712_NOISE_FLOOR 0.0675
+#define ACS_712_CALIBRATION_FACTOR 1.01
 #define ACS_712_VOLTAGE_PER_AMPS 0.185
 
 /*
@@ -111,7 +114,6 @@
 
 // AC voltage level (transformer's isolated output)
 struct ACVoltageData {
-  float sumSquaredVoltage = 0;
   float rmsVoltage = 0;
   float voltage = 0;
   float avgACVoltage = 0;
@@ -120,9 +122,8 @@ struct ACVoltageData {
 
 // AC voltage level (transformer's isolated output)
 struct OutputCurrentSenseData {
-  float sumSquaredCurrent = 0;
+  float acs712ZeroCurrentVoltage = 5.0 / 2.0;
   float rmsCurrent = 0;
-  float avgACCurrent = 0;
 };
 
 // DC voltage level (from battery directly)
@@ -142,9 +143,9 @@ struct BuzzerData {
 
 // SPWM data
 struct SPWMControlData {
-  volatile uint32_t waveformScale = MIN_PWM_ADJ * 128;
+  volatile uint32_t waveformScale = (uint32_t)roundf(MIN_PWM_ADJ * 128.0);
   volatile uint16_t pwmStepIndex = 0;
-  volatile uint16_t lookUp[SIN_DIVISIONS / 2] = {0};
+  volatile uint16_t lookUp[SIN_DIVISIONS / 2] = { 0 };
   const uint16_t half_sinDivisions = SIN_DIVISIONS / 2;
   const volatile uint32_t pwmDutyClampMinPercent = 5;
   const volatile uint32_t pwmDutyClampMaxPercent = 95;
@@ -154,10 +155,6 @@ struct SPWMControlData {
   const volatile uint8_t output_a_on_mask = (1 << COM1A1);
   const volatile uint8_t output_b_on_mask = (1 << COM1B1);
   volatile bool pwmToggleDelay = false;
-  volatile uint8_t pad[4]; // Just to shift things in memory
-  volatile uint8_t pad2[4]; // Just to shift things in memory
-  volatile uint8_t pad3[4]; // Just to shift things in memory
-  volatile uint8_t pad4[4]; // Just to shift things in memory
 };
 
 // UPS control data
@@ -167,6 +164,7 @@ struct UPSData {
   uint64_t testDCOutputOffset = 0;
   uint64_t ocpTriggeredAt = false;
   uint64_t acSwitchedLastAt = 0;
+  uint8_t currentWarnLevel = 0;
   bool powerOut = false;
   bool shutdown = false;
   bool ocpTriggered = false;
@@ -241,7 +239,10 @@ void setup() {
 
   delay(100);
 
+  #if DEBUG
   Serial.begin(115200);
+  #endif
+
   Buzzer::stopBeep();
   LED::stopFlash();
 
@@ -269,6 +270,31 @@ void setup() {
   // ADC Enable, Prescaler=128
   ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0);
 
+  delay(10);
+
+  // Calibrate zero current voltage (no load) for ACS712
+  uint64_t sampleEndTime = millis64() + SAMPLING_WINDOW_MS;
+  uint32_t numSamples = 0;
+  uint32_t sum = 0;
+  float vcc = readVcc();
+
+  while (millis64() < sampleEndTime) {
+    // Select ADC0 (A2), AVCC as reference
+    ADMUX = ADC_INPUT_I_SENSE;
+    ADCSRA |= (1 << ADSC);
+    // Discard result
+    while (bit_is_set(ADCSRA, ADSC)) {};
+    ADCSRA |= (1 << ADSC);
+    while (ADCSRA & (1 << ADSC)) {};
+    sum += ADC;
+
+    numSamples++;
+  }
+
+  outputCurrentSense.acs712ZeroCurrentVoltage = (sum / (float)numSamples) * (vcc / 1023.0);
+  // Finish Zero current calibration
+
+  // Other register initializations
   ICR1 = period;
   TCNT1 = 0;
   TCCR1A = spwmControl.TCCR1AValue;
@@ -277,7 +303,7 @@ void setup() {
   delay(10);
 
   // Enable Timer1 overflow interrupt (triggers ISR(TIMER1_OVF_vect) when Timer1 overflows)
-  TIMSK1 = (1 << TOIE1); 
+  TIMSK1 = (1 << TOIE1);
 
   // Enable Timer2 compare match A interrupt (triggers ISR(TIMER2_COMPA_vect) when OCR2A matches) for buzzer and LED indication light
   TIMSK2 = (1 << OCIE2A);
@@ -291,6 +317,7 @@ void setup() {
 
   // MOSFET Gate Pin for AC/Battery 220V output DPDT Relay
   pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
 
   // Make pin 9, 10 output to ensure they don't float when inactive
   pinMode(OUTPUT_A, OUTPUT);
@@ -326,17 +353,29 @@ void startInverter() {
     upsData.shutdown = true;
   }
 
-  if (!upsData.shutdown && !upsData.ocpTriggered && outputCurrentSense.avgACCurrent >= OCP_CURRENT) {
+  if (!upsData.shutdown && !upsData.ocpTriggered && outputCurrentSense.rmsCurrent >= OCP_CURRENT) {
     upsData.ocpTriggeredAt = now;
     upsData.ocpTriggered = true;
   }
 
   if (now >= upsData.ocpTriggeredAt + OCP_PERMISSIBLE_MS && !upsData.ocpStart) {
-    if (outputCurrentSense.avgACCurrent >= OCP_CURRENT) {
+    if (outputCurrentSense.rmsCurrent >= OCP_CURRENT) {
       upsData.ocpStart = true;
     } else {
       upsData.ocpStart = false;
     }
+  }
+
+  const static float hysteresis = 0.1;
+
+  if (dcVoltage.currentVoltage <= UV_SHUTDOWN_LEVEL) {
+    upsData.currentWarnLevel = 3;
+  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_2 - hysteresis) {
+    upsData.currentWarnLevel = 2;
+  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_1 - hysteresis) {
+    upsData.currentWarnLevel = 1;
+  } else if (dcVoltage.currentVoltage >= UV_WARN_LEVEL_1 + hysteresis) {
+    upsData.currentWarnLevel = 0;
   }
 
   // Buzzer alarm on drained battery
@@ -346,11 +385,11 @@ void startInverter() {
 
   if (upsData.shutdown && !Buzzer::isShutdown()) {
     Buzzer::triggerShutdownAlarm(1000);
-  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_2 && dcVoltage.currentVoltage > UV_SHUTDOWN_LEVEL) {
+  } else if (upsData.currentWarnLevel == 2) {
     Buzzer::beep(5, 40, 60, 2000);
-  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_1 && dcVoltage.currentVoltage > UV_WARN_LEVEL_2) {
+  } else if (upsData.currentWarnLevel == 1) {
     Buzzer::beep(3, 40, 60, 9720);
-  } else if (dcVoltage.currentVoltage > UV_WARN_LEVEL_1) {
+  } else if (upsData.currentWarnLevel == 0) {
     Buzzer::beep(2, 160, 240, 30000);
   }
 
@@ -390,9 +429,9 @@ void startInverter() {
     if (pidOutput > MAX_PWM_ADJ) pidOutput = MAX_PWM_ADJ;
     if (pidOutput < MIN_PWM_ADJ) pidOutput = MIN_PWM_ADJ;
 
-    spwmControl.waveformScale = pidOutput * 128;
+    spwmControl.waveformScale = (uint32_t)roundf(pidOutput * 128.0);
   } else {
-    spwmControl.waveformScale = MIN_PWM_ADJ * 128;
+    spwmControl.waveformScale = (uint32_t)roundf(MIN_PWM_ADJ * 128.0);
   }
 }
 
@@ -400,6 +439,9 @@ void loop() {
   if (upsData.ocpStart) {
     Buzzer::startBeep();
     LED::startFlash();
+
+    // Turn off relay (as inverter is turned off, this will disconnect the output)
+    digitalWrite(3, LOW);
 
     return;
   }
@@ -411,72 +453,75 @@ void loop() {
     adcData.adcRes = readVcc() / 1023.0;
   }
 
-  acVoltage.sumSquaredVoltage = 0;
-  outputCurrentSense.sumSquaredCurrent = 0;
+  float sumSquaredVoltage = 0;
+  float sumSquaredCurrent = 0;
+  uint32_t numSamples = 0;
 
   uint64_t sampleEndTime = millis64() + SAMPLING_WINDOW_MS;
-  uint32_t numSamples = 0;
-  uint16_t rawValue = 0;
 
   while (millis64() < sampleEndTime) {
     // Select ADC0 (A0), AVCC as reference
     ADMUX = ADC_INPUT_AC_VOLTAGE;
+    delayMicroseconds(5);
+
+    // Discard result
     ADCSRA |= (1 << ADSC);
     while (bit_is_set(ADCSRA, ADSC)) {};
+
     ADCSRA |= (1 << ADSC);
     while (ADCSRA & (1 << ADSC)) {};
-    rawValue = ADC;
+    float voltage = ADC * adcData.adcRes;
+    sumSquaredVoltage += voltage * voltage;
 
-    acVoltage.voltage = rawValue * adcData.adcRes;
-
-    acVoltage.sumSquaredVoltage += acVoltage.voltage * acVoltage.voltage;
+    delayMicroseconds(10);
 
     // Select ADC0 (A2), AVCC as reference
     ADMUX = ADC_INPUT_I_SENSE;
-    ADCSRA |= (1 << ADSC);
+    delayMicroseconds(5);
+
     // Discard result
+    ADCSRA |= (1 << ADSC);
     while (bit_is_set(ADCSRA, ADSC)) {};
+
     ADCSRA |= (1 << ADSC);
     while (ADCSRA & (1 << ADSC)) {};
-    rawValue = ADC;
-    float voltage = rawValue * adcData.adcRes;
+    voltage = ADC * adcData.adcRes;
 
-    float centeredVoltage = voltage - (ACS_712_ZERO_CURRENT_VOLTAGE + ACS_712_NOISE_FLOOR);
-    float instCurrent = centeredVoltage <= 0 ? 0 : centeredVoltage / ACS_712_VOLTAGE_PER_AMPS;
-
-    outputCurrentSense.sumSquaredCurrent += instCurrent * instCurrent;
+    float centeredVoltage = voltage - outputCurrentSense.acs712ZeroCurrentVoltage;
+    // float instCurrent = centeredVoltage < 0 ? 0 : centeredVoltage / ACS_712_VOLTAGE_PER_AMPS;
+    float instCurrent = centeredVoltage / ACS_712_VOLTAGE_PER_AMPS;
+    
+    sumSquaredCurrent += instCurrent * instCurrent;
 
     numSamples++;
   }
 
-  acVoltage.rmsVoltage = sqrt(acVoltage.sumSquaredVoltage / numSamples);
+  acVoltage.rmsVoltage = sqrt(sumSquaredVoltage / numSamples);
   acVoltage.avgACVoltage = acVoltage.rmsVoltage * acVoltage.voltageDividerGain * AC_VOLTAGE_MEASUREMENT_CORRECTION_FACTOR;
 
-  outputCurrentSense.rmsCurrent = sqrt(outputCurrentSense.sumSquaredCurrent / numSamples);
-  outputCurrentSense.avgACCurrent = (outputCurrentSense.rmsCurrent);
+  outputCurrentSense.rmsCurrent = sqrt(sumSquaredCurrent / numSamples) * ACS_712_CALIBRATION_FACTOR;
 
   // Get DC Voltage
   // Select ADC1 (A1), AVCC as reference
   ADMUX = ADC_INPUT_DC_VOLTAGE;
-  delayMicroseconds(500);
+  delayMicroseconds(5);
+
   ADCSRA |= (1 << ADSC);
   // Discard result
   while (bit_is_set(ADCSRA, ADSC)) {};
   ADCSRA |= (1 << ADSC);
   while (ADCSRA & (1 << ADSC)) {};
-  rawValue = ADC;
 
-  float scaledVoltage = rawValue * adcData.adcRes;
-  scaledVoltage *= dcVoltage.voltageDividerGain;
-  scaledVoltage *= DC_VOLTAGE_MEASUREMENT_CORRECTION_FACTOR;
+  float scaledVoltage = (ADC * adcData.adcRes) * (dcVoltage.voltageDividerGain * DC_VOLTAGE_MEASUREMENT_CORRECTION_FACTOR);
   dcVoltage.currentVoltage = roundf(scaledVoltage * 100.0f) / 100.0f;
 
+  #if DEBUG
   Serial.print("Res: ");
-  Serial.print(adcData.adcRes * 1000.0);
-  Serial.print(" V | ");
+  Serial.print(adcData.adcRes * 1000);
+  Serial.print(" | ");
 
   Serial.print("DC: ");
-  Serial.print(dcVoltage.currentVoltage, 4);
+  Serial.print(dcVoltage.currentVoltage, 3);
   Serial.print(" V | ");
 
   Serial.print("PWMAdj: ");
@@ -484,11 +529,15 @@ void loop() {
   Serial.print(" | ");
 
   Serial.print("AC: ");
-  Serial.print(acVoltage.avgACVoltage, 4);
+  Serial.print(acVoltage.avgACVoltage, 3);
+  Serial.print("V | ");
+
+  Serial.print("0I: ");
+  Serial.print(outputCurrentSense.acs712ZeroCurrentVoltage, 3);
   Serial.print("V | ");
 
   Serial.print("I: ");
-  Serial.print(outputCurrentSense.avgACCurrent, 4);
+  Serial.print(outputCurrentSense.rmsCurrent, 3);
   Serial.print("A | ");
 
   Serial.print(upsData.shutdown);
@@ -497,10 +546,9 @@ void loop() {
   Serial.print(" | ");
   Serial.print(upsData.ocpStart);
   Serial.print(" | ");
-  Serial.print(acVoltage.voltage);
-  Serial.print(" | ");
 
   Serial.println("");
+  #endif
 
   // Power handling
   now = millis64();
@@ -555,7 +603,7 @@ ISR(TIMER1_OVF_vect) {
     spwmControl.pwmToggleDelay = true;
     // Skip first cycle
     OCR1A = OCR1B = 0;
-    // Eat up 9µs. 1µs = 16 cycles. 9µs = 9 * 16 = 144 cycles 
+    // Eat up 9µs. 1µs = 16 cycles. 9µs = 9 * 16 = 144 cycles
     __asm__ __volatile__("nop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\t");
     __asm__ __volatile__("nop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\t");
     __asm__ __volatile__("nop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\tnop\n\t");
@@ -578,7 +626,7 @@ ISR(TIMER1_OVF_vect) {
     OCR1A = OCR1B = pwm;
   }
 
-  spwmControl.pwmStepIndex++; 
+  spwmControl.pwmStepIndex++;
 }
 
 ISR(TIMER2_COMPA_vect) {
@@ -587,9 +635,10 @@ ISR(TIMER2_COMPA_vect) {
 }
 
 // Debugging
+#if DEBUG
 void uint64ToStr(uint64_t num, char *str) {
   char temp[21];
-  int i = 0;
+  uint8_t i = 0;
 
   if (num == 0) {
     str[0] = '0';
@@ -604,10 +653,11 @@ void uint64ToStr(uint64_t num, char *str) {
   }
 
   // Reverse the string
-  int j = 0;
+  uint8_t j = 0;
   while (i > 0) {
     str[j++] = temp[--i];
   }
 
   str[j] = '\0';
 }
+#endif
