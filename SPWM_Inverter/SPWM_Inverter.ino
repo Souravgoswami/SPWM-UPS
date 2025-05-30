@@ -128,6 +128,7 @@ struct OutputCurrentSenseData {
 
 // DC voltage level (from battery directly)
 struct DCVoltageData {
+  static constexpr float hysteresis = 0.1;
   float currentVoltage = 0;
   float voltageDividerGain = ((float)V_SENSE_R1_VDIV + (float)V_SENSE_R2_VDIV) / (float)V_SENSE_R2_VDIV;
 };
@@ -147,13 +148,13 @@ struct SPWMControlData {
   volatile uint16_t pwmStepIndex = 0;
   volatile uint16_t lookUp[SIN_DIVISIONS / 2] = { 0 };
   const uint16_t half_sinDivisions = SIN_DIVISIONS / 2;
-  const volatile uint32_t pwmDutyClampMinPercent = 5;
-  const volatile uint32_t pwmDutyClampMaxPercent = 95;
+  static constexpr uint32_t pwmDutyClampMinPercent = 5;
+  static constexpr uint32_t pwmDutyClampMaxPercent = 95;
   volatile uint16_t pwmLowClampThreshold = 0;
   volatile uint16_t pwmHighClampThreshold = 0;
   volatile uint8_t TCCR1AValue = (1 << COM1A1) | (1 << WGM11);
-  const volatile uint8_t output_a_on_mask = (1 << COM1A1);
-  const volatile uint8_t output_b_on_mask = (1 << COM1B1);
+  static constexpr uint8_t output_a_on_mask = (1 << COM1A1);
+  static constexpr uint8_t output_b_on_mask = (1 << COM1B1);
   volatile bool pwmToggleDelay = false;
 };
 
@@ -186,11 +187,11 @@ struct PIDControlData {
 
   // --- PID gains ---
   // Proportional gain
-  const float kp = 0.025;
+  static constexpr float kp = 0.025;
   // Integral gain
-  const float ki = 0.0005;
+  static constexpr float ki = 0.0005;
   // Derivative gain
-  const float kd = 0.0001;
+  static constexpr float kd = 0.0001;
 };
 
 ACVoltageData acVoltage;
@@ -240,7 +241,7 @@ void setup() {
   delay(100);
 
   #if DEBUG
-  Serial.begin(115200);
+    Serial.begin(115200);
   #endif
 
   Buzzer::stopBeep();
@@ -340,10 +341,6 @@ void setup() {
   delay(200);
 }
 
-void powerMonitorISR() {
-  upsData.lastChangeTime = millis64();
-}
-
 void startInverter() {
   // Turn off the relay and run the SPWM ISR code
   digitalWrite(3, LOW);
@@ -366,15 +363,13 @@ void startInverter() {
     }
   }
 
-  const static float hysteresis = 0.1;
-
   if (dcVoltage.currentVoltage <= UV_SHUTDOWN_LEVEL) {
     upsData.currentWarnLevel = 3;
-  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_2 - hysteresis) {
+  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_2 - dcVoltage.hysteresis) {
     upsData.currentWarnLevel = 2;
-  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_1 - hysteresis) {
+  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_1 - dcVoltage.hysteresis) {
     upsData.currentWarnLevel = 1;
-  } else if (dcVoltage.currentVoltage >= UV_WARN_LEVEL_1 + hysteresis) {
+  } else if (dcVoltage.currentVoltage >= UV_WARN_LEVEL_1 + dcVoltage.hysteresis) {
     upsData.currentWarnLevel = 0;
   }
 
@@ -490,7 +485,7 @@ void loop() {
     float centeredVoltage = voltage - outputCurrentSense.acs712ZeroCurrentVoltage;
     // float instCurrent = centeredVoltage < 0 ? 0 : centeredVoltage / ACS_712_VOLTAGE_PER_AMPS;
     float instCurrent = centeredVoltage / ACS_712_VOLTAGE_PER_AMPS;
-    
+
     sumSquaredCurrent += instCurrent * instCurrent;
 
     numSamples++;
@@ -516,38 +511,38 @@ void loop() {
   dcVoltage.currentVoltage = roundf(scaledVoltage * 100.0f) / 100.0f;
 
   #if DEBUG
-  Serial.print("Res: ");
-  Serial.print(adcData.adcRes * 1000);
-  Serial.print(" | ");
+    Serial.print("Res: ");
+    Serial.print(adcData.adcRes * 1000);
+    Serial.print(" | ");
 
-  Serial.print("DC: ");
-  Serial.print(dcVoltage.currentVoltage, 3);
-  Serial.print(" V | ");
+    Serial.print("DC: ");
+    Serial.print(dcVoltage.currentVoltage, 3);
+    Serial.print(" V | ");
 
-  Serial.print("PWMAdj: ");
-  Serial.print(spwmControl.waveformScale);
-  Serial.print(" | ");
+    Serial.print("PWMAdj: ");
+    Serial.print(spwmControl.waveformScale);
+    Serial.print(" | ");
 
-  Serial.print("AC: ");
-  Serial.print(acVoltage.avgACVoltage, 3);
-  Serial.print("V | ");
+    Serial.print("AC: ");
+    Serial.print(acVoltage.avgACVoltage, 3);
+    Serial.print("V | ");
 
-  Serial.print("0I: ");
-  Serial.print(outputCurrentSense.acs712ZeroCurrentVoltage, 3);
-  Serial.print("V | ");
+    Serial.print("0I: ");
+    Serial.print(outputCurrentSense.acs712ZeroCurrentVoltage, 3);
+    Serial.print("V | ");
 
-  Serial.print("I: ");
-  Serial.print(outputCurrentSense.rmsCurrent, 3);
-  Serial.print("A | ");
+    Serial.print("I: ");
+    Serial.print(outputCurrentSense.rmsCurrent, 3);
+    Serial.print("A | ");
 
-  Serial.print(upsData.shutdown);
-  Serial.print(" | ");
-  Serial.print(upsData.switchToAC);
-  Serial.print(" | ");
-  Serial.print(upsData.ocpStart);
-  Serial.print(" | ");
+    Serial.print(upsData.shutdown);
+    Serial.print(" | ");
+    Serial.print(upsData.switchToAC);
+    Serial.print(" | ");
+    Serial.print(upsData.ocpStart);
+    Serial.print(" | ");
 
-  Serial.println("");
+Serial.println("");
   #endif
 
   // Power handling
@@ -632,6 +627,10 @@ ISR(TIMER1_OVF_vect) {
 ISR(TIMER2_COMPA_vect) {
   Buzzer::update();
   LED::update();
+}
+
+void powerMonitorISR() {
+  upsData.lastChangeTime = millis64();
 }
 
 // Debugging
