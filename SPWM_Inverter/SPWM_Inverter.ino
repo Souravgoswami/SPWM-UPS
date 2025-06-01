@@ -14,7 +14,7 @@
 // I'm using 13 SWG pure copper wire, having a skin depth of 1190um at 3kHz, which is on the edge.
 // Having more frequency or bunching up multiple wires together during transformer winding will increase the overall waveform and the efficiency
 // NOTE THAT HAVING LOWER SIN_DIVISIONS (e.g. 10) WILL OSCILLATE THE OUTPUT. PLEASE ADJUST PID CONTROL PARAMETERS TO AVOID THAT.
-#define SIN_DIVISIONS 44
+#define SIN_DIVISIONS 46
 #define POWER_CONFIRMATION_DELAY 10
 // Sinusoidal frequency
 #define FREQUENCY 50
@@ -33,7 +33,7 @@
 #define AC_VOLTAGE_MEASUREMENT_CORRECTION_FACTOR 1
 #define DC_VOLTAGE_MEASUREMENT_CORRECTION_FACTOR 1
 
-#define SAMPLING_WINDOW_MS 50
+#define SAMPLING_WINDOW_MS 25
 #define RESISTOR_DIVIDER_1 1000000
 #define RESISTOR_DIVIDER_2 10000
 
@@ -43,7 +43,7 @@
 */
 #define DELAY_MS_BEFORE_RELAY_TOGGLES_FROM_DC_TO_DC 2000
 #define SHUTDOWN_COOLDOWN_PERIOD_AFTER_AC_RECOVERY 1000
-#define SOFT_START_RAMP_DURATION 400
+#define SOFT_START_RAMP_DURATION 350
 #define RELAY_PIN 3
 
 #define BUZZER_PIN 4
@@ -117,11 +117,11 @@
   --- PID gains ---
 */
 // Proportional gain
-#define PID_KP 0.025f
+#define PID_KP 0.035f
 // Integral gain
 #define PID_KI 0.0005f
 // Derivative gain
-#define PID_KD 0.0001f
+#define PID_KD 0.00005f
 
 // Do not modify
 #define OUTPUT_A 9
