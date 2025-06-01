@@ -23,7 +23,10 @@
 #define MAX_PWM_ADJ 1.25
 #define MIN_PWM_ADJ 0.15
 #define TARGET_VOLTAGE 210.f
+
+// Delays in setup
 #define TEST_DC_OUTPUT_AFTER_STARTUP_DURATION 1000
+#define POWER_ON_STABILIZATION_DELAY_MS 100
 
 /*
   --- AC/DC Voltage Detection ---
@@ -33,7 +36,7 @@
 #define AC_VOLTAGE_MEASUREMENT_CORRECTION_FACTOR 1
 #define DC_VOLTAGE_MEASUREMENT_CORRECTION_FACTOR 1
 
-#define SAMPLING_WINDOW_MS 25
+#define SAMPLING_WINDOW_MS 30
 #define RESISTOR_DIVIDER_1 1000000
 #define RESISTOR_DIVIDER_2 10000
 
@@ -117,11 +120,11 @@
   --- PID gains ---
 */
 // Proportional gain
-#define PID_KP 0.035f
+#define PID_KP 0.025f
 // Integral gain
 #define PID_KI 0.0005f
 // Derivative gain
-#define PID_KD 0.00005f
+#define PID_KD 0.000025f
 
 // Do not modify
 #define OUTPUT_A 9
@@ -141,11 +144,13 @@ struct ACVoltageData {
   float voltageDividerGain = ((float)RESISTOR_DIVIDER_1 + (float)RESISTOR_DIVIDER_2) / (float)RESISTOR_DIVIDER_2;
 };
 
-// AC voltage level (transformer's isolated output)
+// AC current level
 struct OutputCurrentSenseData {
   static constexpr float acs712VoltsPerAmps = 1.0 / ACS_712_VOLTS_PER_AMPS;
   float acs712ZeroCurrentVoltage = 2.5;
   float rmsCurrent = 0;
+
+  uint16_t zeroCurrentOffset = 0;
 
   bool acs712IsPresent = false;
 };
@@ -223,7 +228,7 @@ struct SoftStarterData {
 
 // PID Controller Data
 struct PIDControlData {
-  float loopDeltaTime = 0;
+  uint64_t loopDeltaTime = 0;
 
   float filteredError = 0;
   float integrator = 0;
@@ -265,7 +270,8 @@ float readVcc() {
 }
 
 void setup() {
-  delay(100);
+  // Let MCU other peripherals stabilize
+  delay(POWER_ON_STABILIZATION_DELAY_MS);
 
   // Configure and beep 12V Buzzer
   Buzzer::begin(BUZZER_PIN, LED_WARNING_PIN);
@@ -274,14 +280,10 @@ void setup() {
   Buzzer::startBeep();
   LED::startFlash();
 
-  delay(100);
-
   #if DEBUG
     Serial.begin(115200);
+    Serial.println("Started");
   #endif
-
-  Buzzer::stopBeep();
-  LED::stopFlash();
 
   // Period of PWM in clock cycles
   uint16_t period = F_CPU / FREQUENCY / SIN_DIVISIONS;
@@ -312,7 +314,7 @@ void setup() {
   // Calibrate zero current voltage (no load) for ACS712
   uint32_t numSamples = 0;
   uint32_t sum = 0;
-  const uint64_t sampleEndTime = millis64() + SAMPLING_WINDOW_MS;
+  const uint64_t sampleEndTime = millis64() + (SAMPLING_WINDOW_MS * 4);
   const float vcc = readVcc();
 
   while (millis64() < sampleEndTime) {
@@ -370,18 +372,18 @@ void setup() {
   digitalWrite(OUTPUT_A, LOW);
   digitalWrite(OUTPUT_B, LOW);
 
-  delay(TEST_DC_OUTPUT_AFTER_STARTUP_DURATION);
+  Buzzer::stopBeep();
+  LED::stopFlash();
+  Buzzer::shutdown();
 
-  for (uint8_t i = 0; i < 3; ++i) {
-    Buzzer::startBeep();
+  const uint32_t startUpdelay = millis() + TEST_DC_OUTPUT_AFTER_STARTUP_DURATION;
+
+  while(millis() < startUpdelay) {
     LED::startFlash();
-    delay(45);
-    Buzzer::stopBeep();
+    delay(125);
     LED::stopFlash();
-    delay(45);
+    delay(125);
   }
-
-  delay(200);
 }
 
 void startInverter() {
@@ -451,7 +453,7 @@ void startInverter() {
       pidControl.filteredError = 0.9 * pidControl.filteredError + 0.1 * error;
 
       // --- Derivative term ---
-      const float derivative = (pidControl.filteredError - pidControl.previousError) / pidControl.loopDeltaTime;  // assuming 60ms loop
+      const float derivative = (float)((pidControl.filteredError - pidControl.previousError) * 1e6f) / pidControl.loopDeltaTime;
       pidControl.previousError = pidControl.filteredError;
 
       // --- Predict output (before clamping) ---
@@ -479,7 +481,7 @@ void startInverter() {
 }
 
 void loop() {
-  uint64_t loopStartTime = micros64();
+  const uint64_t loopStartTime = micros64();
 
   if (upsData.ocpStart) {
     Buzzer::resume();
@@ -490,7 +492,6 @@ void loop() {
 
     // Turn off relay (as inverter is turned off, this will disconnect the output)
     digitalWrite(3, LOW);
-    delay(1000);
 
     return;
   }
@@ -500,10 +501,11 @@ void loop() {
   if (now > adcData.adcResLastUpdatedAtWithOffset) {
     adcData.adcResLastUpdatedAtWithOffset = now + ADC_RES_UPDATE_INTERVAL;
     adcData.adcRes = readVcc() / 1023.0;
+    outputCurrentSense.zeroCurrentOffset = outputCurrentSense.acs712ZeroCurrentVoltage / adcData.adcRes;
   }
 
-  float sumSquaredVoltage = 0;
-  float sumSquaredCurrent = 0;
+  uint64_t sumSquaredVoltageRaw = 0;
+  uint64_t sumSquaredCurrentRaw = 0;
   uint32_t numSamples = 0;
 
   const uint64_t sampleEndTime = millis64() + SAMPLING_WINDOW_MS;
@@ -517,8 +519,9 @@ void loop() {
 
     ADCSRA |= (1 << ADSC);
     while (ADCSRA & (1 << ADSC)) {};
-    float voltage = ADC * adcData.adcRes;
-    sumSquaredVoltage += voltage * voltage;
+
+    uint32_t rawValue = ADC;
+    sumSquaredVoltageRaw += rawValue * rawValue;
 
     if (outputCurrentSense.acs712IsPresent) {
       // Select ADC0 (A2), AVCC as reference
@@ -529,18 +532,23 @@ void loop() {
 
       ADCSRA |= (1 << ADSC);
       while (ADCSRA & (1 << ADSC)) {};
-      voltage = ADC * adcData.adcRes;
 
-      float centeredVoltage = voltage - outputCurrentSense.acs712ZeroCurrentVoltage;
-      float instCurrent = centeredVoltage * outputCurrentSense.acs712VoltsPerAmps;
-
-      sumSquaredCurrent += instCurrent * instCurrent;
+      rawValue = ADC;
+      int32_t centeredRaw = rawValue - outputCurrentSense.zeroCurrentOffset;
+      sumSquaredCurrentRaw += centeredRaw * centeredRaw;
     }
 
     numSamples++;
   }
 
+  const float voltageScale = adcData.adcRes;
+  const float currentScale = adcData.adcRes * outputCurrentSense.acs712VoltsPerAmps;
+
+  float sumSquaredVoltage = sumSquaredVoltageRaw * voltageScale * voltageScale;
+  float sumSquaredCurrent = sumSquaredCurrentRaw * currentScale * currentScale;
+
   float inverseNumSamples = 1.0 / numSamples;
+
   acVoltage.rmsVoltage = sqrt(sumSquaredVoltage * inverseNumSamples);
   acVoltage.avgACVoltage = acVoltage.rmsVoltage * acVoltage.voltageDividerGain * AC_VOLTAGE_MEASUREMENT_CORRECTION_FACTOR;
 
@@ -558,6 +566,49 @@ void loop() {
   const float scaledVoltage = (ADC * adcData.adcRes) * (dcVoltage.voltageDividerGain * DC_VOLTAGE_MEASUREMENT_CORRECTION_FACTOR);
   dcVoltage.currentVoltage = roundf(scaledVoltage * 100.0) / 100.0;
 
+  now = millis64();
+
+  #if DEBUG
+    Serial.print(F("Res: "));
+    Serial.print(adcData.adcRes, 5);
+    Serial.print(F(" | "));
+
+    Serial.print(F("ADC Samples: "));
+    Serial.print(numSamples);
+    Serial.print(F(" | "));
+
+    Serial.print(F("DC: "));
+    Serial.print(dcVoltage.currentVoltage, 2);
+    Serial.print(F("V | "));
+
+    Serial.print(F("PWMAdj: "));
+    Serial.print(spwmControl.waveformScale);
+    Serial.print(F(" | "));
+
+    Serial.print(F("AC: "));
+    Serial.print(acVoltage.avgACVoltage, 1);
+    Serial.print(F("V | "));
+
+    Serial.print(F("0I: "));
+    Serial.print(outputCurrentSense.acs712ZeroCurrentVoltage, 2);
+    Serial.print(F("V | "));
+
+    Serial.print(F("I: "));
+    Serial.print(outputCurrentSense.rmsCurrent, 2);
+    Serial.print(F("A | "));
+
+    Serial.print(F("LoopDeltaT: "));
+    Serial.print(pidControl.loopDeltaTime * 1e-6f, 4);
+    Serial.print(F(" | "));
+
+    Serial.print(upsData.shutdown);
+    Serial.print(upsData.switchToAC);
+    Serial.print(upsData.ocpStart);
+
+    Serial.println(F(""));
+  #endif
+
+  // Power handling
   if (!upsData.shutdown && outputCurrentSense.rmsCurrent >= OCP_INSTANT_SHUTDOWN_CURRENT) {
     upsData.ocpStart = true;
   }
@@ -576,47 +627,6 @@ void loop() {
     }
   }
 
-  #if DEBUG
-    Serial.print("Res: ");
-    Serial.print(adcData.adcRes * 1000);
-    Serial.print(" | ");
-
-    Serial.print("DC: ");
-    Serial.print(dcVoltage.currentVoltage, 3);
-    Serial.print(" V | ");
-
-    Serial.print("PWMAdj: ");
-    Serial.print(spwmControl.waveformScale);
-    Serial.print(" | ");
-
-    Serial.print("AC: ");
-    Serial.print(acVoltage.avgACVoltage, 3);
-    Serial.print("V | ");
-
-    Serial.print("0I: ");
-    Serial.print(outputCurrentSense.acs712ZeroCurrentVoltage, 3);
-    Serial.print("V | ");
-
-    Serial.print("I: ");
-    Serial.print(outputCurrentSense.rmsCurrent, 3);
-    Serial.print("A | ");
-
-    Serial.print("LoopDeltaT: ");
-    Serial.print(pidControl.loopDeltaTime, 3);
-    Serial.print(" | ");
-
-    Serial.print(upsData.shutdown);
-    Serial.print(" | ");
-    Serial.print(upsData.switchToAC);
-    Serial.print(" | ");
-    Serial.print(upsData.ocpStart);
-    Serial.print(" | ");
-
-    Serial.println("");
-  #endif
-
-  // Power handling
-  now = millis64();
   upsData.powerOut = now > upsData.lastChangeTime + POWER_CONFIRMATION_DELAY;
 
   // Logic when AC input is connected
@@ -644,13 +654,12 @@ void loop() {
 
     // Ensure soft-start is triggered next time inverter is activated
     softStarter.reset = true;
-
   } else {
     startInverter();
   }
 
   uint64_t loopEndTime = micros64();
-  pidControl.loopDeltaTime = (loopEndTime - loopStartTime) * 1e-6f;
+  pidControl.loopDeltaTime = loopEndTime - loopStartTime;
 }
 
 ISR(TIMER1_OVF_vect) {
