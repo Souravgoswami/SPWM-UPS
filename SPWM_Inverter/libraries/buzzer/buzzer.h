@@ -3,37 +3,38 @@
 #endif
 
 class Buzzer {
-public:
-  static void begin(uint8_t buzzerPin, uint8_t ledPin);
-  static void beep(uint8_t count, uint16_t duration, uint16_t interval, uint16_t repeatDelay);
-  static void tick();
-  static void shutdown();
-  static void resume();
-  static void startBeep();
-  static void stopBeep();
-  static bool isShutdown();
-  static void triggerShutdownAlarm(uint16_t milliSeconds);
+  public:
+    static void begin(uint8_t buzzerPin, uint8_t ledPin);
+    static void beep(uint8_t count, uint16_t duration, uint16_t interval, uint16_t repeatDelay);
+    static void update();
+    static void shutdown(bool ledState = 0);
+    static void resume();
+    static void startBeep();
+    static void stopBeep();
+    static bool isShutdown();
+    static void triggerShutdownAlarm(uint16_t milliSeconds);
+    static bool isBusy() { return inBeepSequence; }
 
-private:
-  static uint8_t _buzzerPin;
-  static uint8_t _ledPin;
-  static bool inBeepSequence;
-  static bool buzzerOn;
-  static uint32_t nextToggleTime;
-  static uint32_t lastSequenceTime;
-  static uint16_t beepIndex;
-  static uint16_t buzz_count;
-  static uint16_t buzz_duration;
-  static uint16_t buzz_interval;
-  static uint32_t buzzRepeatDelay;
-  static bool pendingRequest;
-  static bool stopped;
-  static bool longBeepActive;
-  static uint32_t longBeepEndTick;
-  static volatile uint8_t* _buzzerPort;
-  static uint8_t _buzzerBit;
-  static volatile uint8_t* _ledPort;
-  static uint8_t _ledBit;
+  private:
+    static uint8_t _buzzerPin;
+    static uint8_t _ledPin;
+    static bool inBeepSequence;
+    static bool buzzerOn;
+    static uint32_t nextToggleTime;
+    static uint32_t lastSequenceTime;
+    static uint16_t beepIndex;
+    static uint16_t buzz_count;
+    static uint16_t buzz_duration;
+    static uint16_t buzz_interval;
+    static uint32_t buzzRepeatDelay;
+    static bool pendingRequest;
+    static bool stopped;
+    static bool longBeepActive;
+    static uint32_t longBeepEndTick;
+    static volatile uint8_t* _buzzerPort;
+    static uint8_t _buzzerBit;
+    static volatile uint8_t* _ledPort;
+    static uint8_t _ledBit;
 };
 
 uint8_t Buzzer::_buzzerPin = 0;
@@ -68,10 +69,10 @@ void Buzzer::begin(uint8_t buzzerPin, uint8_t ledPin) {
   _ledPort = portOutputRegister(digitalPinToPort(_ledPin));
   _ledBit = digitalPinToBitMask(_ledPin);
 
-  // Set buzzer LOW
+  // BUZZER -> LOW
   *_buzzerPort &= ~_buzzerBit;
 
-  // Set LED HIGH
+  // LED -> HIGH
   *_ledPort |= _ledBit;
 }
 
@@ -93,7 +94,7 @@ void Buzzer::beep(uint8_t count, uint16_t duration, uint16_t interval, uint16_t 
   pendingRequest = true;
 }
 
-void Buzzer::tick() {
+void Buzzer::update() {
   uint32_t now = millis();
 
   // Handle long single beep (non-interrupting)
@@ -137,13 +138,20 @@ void Buzzer::tick() {
   }
 }
 
-void Buzzer::shutdown() {
+void Buzzer::shutdown(bool ledState) {
 
   if (BUZZER_ENABLED) {
+    // BUZZER -> LOW
     *_buzzerPort &= ~_buzzerBit;
   }
 
-  *_ledPort &= ~_ledBit;
+  // LED -> LOW
+  if (ledState) {
+    *_ledPort |= _ledBit;
+  } else {
+    *_ledPort &= ~_ledBit;
+  }
+
   stopped = true;
 }
 
@@ -154,7 +162,10 @@ bool Buzzer::isShutdown() {
 void Buzzer::resume() {
   if (stopped) {
     // Resume to default state
+    // BUZZER -> LOW
     *_buzzerPort &= ~_buzzerBit;
+
+    // LED -> HIGH
     *_ledPort |= _ledBit;
 
     stopped = false;
@@ -164,10 +175,11 @@ void Buzzer::resume() {
 void Buzzer::startBeep() {
   if (!stopped) {
     if (BUZZER_ENABLED) {
-      // digitalWrite(_buzzerPin, HIGH);
+      // Buzzer -> HIGH
       *_buzzerPort |= _buzzerBit;
     }
 
+      // LED -> LOW
     *_ledPort &= ~_ledBit;
   }
 }
@@ -175,11 +187,11 @@ void Buzzer::startBeep() {
 void Buzzer::stopBeep() {
   if (!stopped) {
     if (BUZZER_ENABLED) {
-      // digitalWrite(_buzzerPin, LOW);
+      // Buzzer -> LOW
     *_buzzerPort &= ~_buzzerBit;
     }
 
+    // LED -> HIGH
   *_ledPort |= _ledBit;
-    // digitalWrite(_ledPin, HIGH);
   }
 }
