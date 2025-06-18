@@ -14,7 +14,7 @@
 // I'm using 13 SWG pure copper wire, having a skin depth of 1190um at 3kHz, which is on the edge.
 // Having more frequency or bunching up multiple wires together during transformer winding will increase the overall waveform and the efficiency
 // NOTE THAT HAVING LOWER SIN_DIVISIONS (e.g. 10) WILL OSCILLATE THE OUTPUT. PLEASE ADJUST PID CONTROL PARAMETERS TO AVOID THAT.
-#define SIN_DIVISIONS 46
+#define SIN_DIVISIONS 80
 #define POWER_CONFIRMATION_DELAY 10
 // Sinusoidal frequency
 #define FREQUENCY 50
@@ -56,7 +56,6 @@
 #define BUZZ_PAUSE 80
 // Number of beeps in each sequence
 #define BUZZ_COUNT 2
-#define BUZZ_REPEAT_INTERVAL 5000
 
 /*
   --- UV ---
@@ -162,17 +161,6 @@ struct DCVoltageData {
   float voltageDividerGain = ((float)V_SENSE_R1_VDIV + (float)V_SENSE_R2_VDIV) / (float)V_SENSE_R2_VDIV;
 };
 
-// Buzzer implementation
-struct BuzzerData {
-  uint64_t nextToggleTime = 0;
-  uint64_t lastSequenceTime = 0;
-
-  uint16_t beepIndex = 0;
-
-  bool buzzerOn = false;
-  bool inBeepSequence = false;
-};
-
 // SPWM data
 struct SPWMControlData {
   volatile uint32_t waveformScale = (uint32_t)roundf(MIN_PWM_ADJ * 128.0);
@@ -196,10 +184,8 @@ struct SPWMControlData {
 struct UPSData {
   uint64_t lastChangeTime = 0;
   uint64_t lastSwitchedToDCOffset = 0;
-  uint64_t testDCOutputOffset = 0;
   uint64_t ocpTriggeredAt = 0;
   uint64_t acSwitchedLastAt = 0;
-
   uint8_t currentWarnLevel = 0;
 
   bool powerOut = false;
@@ -238,7 +224,6 @@ struct PIDControlData {
 ACVoltageData acVoltage;
 OutputCurrentSenseData outputCurrentSense;
 DCVoltageData dcVoltage;
-BuzzerData buzzer;
 SPWMControlData spwmControl;
 SoftStarterData softStarter;
 PIDControlData pidControl;
@@ -395,14 +380,14 @@ void startInverter() {
     upsData.shutdown = true;
   }
 
-  if (dcVoltage.currentVoltage <= UV_SHUTDOWN_LEVEL) {
-    upsData.currentWarnLevel = 3;
-  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_2 - dcVoltage.hysteresis) {
-    upsData.currentWarnLevel = 2;
-  } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_1 - dcVoltage.hysteresis) {
-    upsData.currentWarnLevel = 1;
-  } else if (dcVoltage.currentVoltage >= UV_WARN_LEVEL_1 + dcVoltage.hysteresis) {
-    upsData.currentWarnLevel = 0;
+  if (!(dcVoltage.currentVoltage <= UV_SHUTDOWN_LEVEL || Buzzer::isBusy())) {
+    if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_2 - dcVoltage.hysteresis) {
+      upsData.currentWarnLevel = 2;
+    } else if (dcVoltage.currentVoltage <= UV_WARN_LEVEL_1 - dcVoltage.hysteresis) {
+      upsData.currentWarnLevel = 1;
+    } else if (dcVoltage.currentVoltage >= UV_WARN_LEVEL_1 + dcVoltage.hysteresis) {
+      upsData.currentWarnLevel = 0;
+    }
   }
 
   // Buzzer alarm on drained battery
@@ -417,7 +402,7 @@ void startInverter() {
   } else if (upsData.currentWarnLevel == 1) {
     Buzzer::beep(3, 40, 60, 9720);
   } else if (upsData.currentWarnLevel == 0) {
-    Buzzer::beep(2, 160, 240, 30000);
+    Buzzer::beep(2, 160, 240, 60000);
   }
 
   // LED alarm on drained battery
